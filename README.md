@@ -177,13 +177,44 @@ self.kf_state[col_idx] = (est, err)
 - 실시간으로 스트리밍되는 데이터는 수집 주기($t$)와 묶음 크기($n$)에 따라 하나의 Chunk(부분군)로 묶여 처리됩니다.
 - 각 Chunk 내에서 평균($\bar{X}$)과 변동(Range, $s$, 혹은 Moving Range)을 계산하며, 전체 히스토리를 재계산할 필요 없이 이전 단계의 추정값(State)과 현재의 Chunk 데이터만을 이용하여 통계량을 갱신하므로 연산 부하가 최소화됩니다.
 
-### 3. EWMA (지수 가중 이동 평균) 계산 방법
-- Welford 방식의 일반 누적 평균을 보완하기 위해, 과거 데이터의 비중을 지수적으로 감소시키고 최신 데이터의 가중치를 높이는 EWMA를 적용합니다.
-- **수식**: $Z_t = \alpha \cdot X_t + (1 - \alpha) \cdot Z_{t-1}$
-  - $\alpha$: 지수 평활 계수 (사용자 입력, 기본 0.15)
-  - $X_t$: 현재 Chunk의 평균 또는 변동
-  - $Z_t$: 업데이트된 프로세스 대평균(Grand Mean) 및 평활화된 프로세스 분산
-- 이 방식으로 계산된 대평균과 프로세스 분산을 바탕으로 전통적인 SPC 계수표($d_2, A_2, A_3, B_3, B_4$ 등)를 적용하여 관리 한계(UCL/LCL)를 매 시점 갱신합니다.
+### 3. 통계치 재귀적(Recursive) 갱신 및 관리한계(UCL/LCL) 산출
+전체 히스토리를 메모리에 유지하며 재계산하는 방식은 스트리밍 환경에서 부하가 큽니다. 따라서 이전 상태(State)와 현재의 데이터(Chunk)만을 이용해 평균과 분산을 갱신하는 **재귀적(Recursive) 알고리즘**을 도입했습니다.
+
+- **EWMA (지수 가중 이동 평균) 재귀 갱신**
+  - **수식**: $Z_t = \alpha \cdot X_t + (1 - \alpha) \cdot Z_{t-1}$
+  - 과거 데이터 비중을 지수적으로 감소시켜 최신 트렌드 반영력을 높입니다.
+  
+- **Welford 알고리즘 기반 누적 통계 재귀 갱신**
+  - 전체 누적 평균과 누적 변동 평균을 메모리 오버플로우 없이 O(1) 시간복잡도로 안전하게 업데이트합니다.
+
+- **UCL/LCL 관리 한계 계산**
+  - 이렇게 재귀적으로 갱신된 대평균(Grand Mean)과 프로세스 분산(Dispersion)을 바탕으로 전통적인 SPC 계수표($d_2, A_2, A_3, B_3, B_4$ 등)를 적용하여 실시간으로 $\pm 3\sigma$ 한계선을 갱신합니다.
+
+**💻 재귀적 업데이트 및 UCL/LCL 계산 로직 예시 (algorithm.py 발췌):**
+```python
+# 1. EWMA 재귀적 업데이트
+# 현재 청크의 평균(chunk_mean)과 변동(chunk_disp)을 이전 EWMA 상태와 결합 (alpha: 가중치)
+self.ewma_mean[basis] = self.alpha * chunk_mean + (1 - self.alpha) * self.ewma_mean[basis]
+self.ewma_disp[basis] = self.alpha * chunk_disp + (1 - self.alpha) * self.ewma_disp[basis]
+
+# 2. Welford 누적 평균/변동 재귀적 업데이트
+self.welford_count += 1
+self.welford_mean += (chunk_mean - self.welford_mean) / self.welford_count
+self.welford_disp_mean += (chunk_disp - self.welford_disp_mean) / self.welford_count
+
+# 3. 계산된 재귀 통계량을 바탕으로 실시간 UCL/LCL 산출 (부분군 크기 n에 따른 계수표 분기)
+if 2 <= n <= 5:
+    c = R_CHART_CONSTANTS[n]
+    A2, D3, D4 = c["A2"], c["D3"], c["D4"]
+    
+    # 평균(X-bar) 관리한계선 (EWMA 기준)
+    ucl_mean = self.ewma_mean[basis] + A2 * self.ewma_disp[basis]
+    lcl_mean = self.ewma_mean[basis] - A2 * self.ewma_disp[basis]
+    
+    # 변동(R) 관리한계선
+    ucl_disp = D4 * self.ewma_disp[basis]
+    lcl_disp = D3 * self.ewma_disp[basis]
+```
 
 ### 4. 기저선(Baseline) 추적 및 Shift/Spike 판정 기준
 안정적인 공정 상태를 묘사하는 동적 기저선을 추적하여, 공정의 급격한 수준 변화(Mean Shift)나 변동 폭발(Variance Spike)을 감지합니다.
@@ -200,6 +231,17 @@ self.kf_state[col_idx] = (est, err)
   - 발생 시, 분산 차트상에 푸른색 수직선과 일련번호를 표기하고 엑셀에도 푸른색 폰트로 강조합니다.
 - **예외 처리**: 기저선 버퍼가 가득 차기 전(초기 `baseline_size` 도달 전)에는 신뢰도 확보를 위해 Shift 및 Spike 감지를 일시적으로 억제합니다.
 
+### 5. 시각화 및 결과 저장 로직 (Shift & Spike 마킹)
+실시간으로 감지된 공정의 이상 상태(Mean Shift 및 Variance Spike)는 즉각적인 인지가 가능하도록 차트 및 엑셀 결과물에 시각적으로 강조됩니다.
+
+- **실시간 차트 및 PDF 리포트 (`plot_and_save_pdf`, `update_plot`)**
+  - **붉은색 세로선 (Mean Shift)**: 평균 관리도(상단 차트)에서 `Mean_Shift == True`인 Chunk 인덱스 위치에 붉은색 수직선(`vlines`)을 긋고, 상단에 해당 일련번호를 붉은 텍스트로 표기합니다.
+  - **푸른색 세로선 (Variance Spike)**: 변동 관리도(하단 차트)에서 `Variance_Spike == True`인 Chunk 인덱스 위치에 푸른색 수직선(`vlines`)을 긋고, 상단에 해당 일련번호를 푸른 텍스트로 표기합니다.
+- **Excel 데이터 저장 (`save_excel`)**
+  - `openpyxl` 엔진을 사용하여 각 행(Row) 단위로 조건부 포맷팅(폰트 색상)을 적용합니다.
+  - **Mean Shift 단독 발생**: 해당 데이터 행 전체를 **붉은색 굵은 폰트(Red Bold)**로 표기.
+  - **Variance Spike 단독 발생**: 해당 데이터 행 전체를 **푸른색 굵은 폰트(Blue Bold)**로 표기.
+  - **동시 발생 (Shift & Spike)**: 두 가지 이상이 동시에 발생한 심각한 상태로 간주하여 행 전체를 **보라색 굵은 폰트(Purple Bold)**로 표기합니다.
 ---
 
 ## 🧩 시스템 아키텍처 및 Agent 구성 (기획안)
