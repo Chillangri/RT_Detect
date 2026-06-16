@@ -1,6 +1,13 @@
+# 참고자료
+- 최초 프로그램 기획 : [[rt_detect 프로그램 기획서 (Gemini)]], [[01_RT_Detect Design (초안)]]
+- 실시간 관리 상/하한 설정: [[관리 상한, 하한 설정 방법의 설계]]
+- 이론적 배경: [[2203_Realtime_detect]], [[Welford Control Limits]], [[FFT와 Kalman의 UCL과 LCL]]
+
 # 실시간 설비 데이터 분석 및 이상 탐지 파이프라인 (RT Detect)
 
-본 프로젝트는 실시간으로 발생하는 센서 및 설비 데이터를 수집·분석하여 노이즈를 제거하고 통계적 이상치를 판별하는 시스템입니다. 현재는 가상 데이터(Excel/CSV) 모사를 통한 알고리즘 검증 및 파이프라인 기반으로 구현되어 있으며, 향후 4개의 전문 Agent 기반 아키텍처로 확장 설계되었습니다.
+이 프로그램은 향후 HearIM-Detect의 기반이 될 것으로, 현장에서 실시간으로 발생하는 센서 및 설비 데이터를 실시간으로 수집·분석하는 환경을 전제로 한다. 해당 환경에서 ① 데이터의 수집 주기($t$)와 분석 단위($n$, 샘플군의 수)를 설정하고, ② 수집 데이터를 대상으로 **실시간**으로 Noise를 제거하고 (Raw Data, FFT, Kalman Filter), ③ 평균 이동(Mean Shift)과 분산 폭증 (Variance Spike)을 판별하는 기능을 수행한다.
+
+현재는 가상 데이터(Excel/CSV) 모사를 통한 알고리즘 검증 및 파이프라인 기반으로 구현되어 있으며, 향후 4개의 전문 Agent 기반 아키텍처로 확장 설계되었습니다.
 
 ## 🎯 프로젝트 개요 (Project Definition)
 
@@ -13,7 +20,7 @@
 
 ## 🚀 주요 기능 (현재 구현 상태)
 
-- **대화형(Interactive) 설정 및 동적 데이터 로딩**: `./source` 디렉토리에 위치한 Excel/CSV 파일을 읽어 지정된 주기($t$)와 크기($n$)에 맞춰 청크 단위로 스트리밍하며, CLI를 통해 분석 파일, 타겟/그룹 칼럼 및 $\alpha$(가중치) 등 각종 파라미터를 손쉽게 설정할 수 있습니다.
+- **대화형(Interactive) 설정 및 동적 데이터 로딩**: `./source` 디렉토리에 위치한 Excel/CSV 파일을 읽어 지정된 주기($t$)와 크기($n$)에 맞춰 청크 단위로 스트리밍하며, CLI를 통해 분석 대상 파일, 타겟/그룹 칼럼 및 EWA 계산에 필요한 $\alpha$(가중치) 등 각종 파라미터를 설정하고 프로그램의 기동
 - **다중 필터 기반 노이즈 제거 (FFT & Kalman)**: `apply_filters()` 함수를 통해 노이즈를 제거합니다.
   - **FFT Filter**: `scipy.fft`를 활용하여 최근 1만 개의 개별 측정값 히스토리에 대해 푸리에 변환 후 고주파(파라미터 `cutoff_ratio=0.5`) 대역을 차단하는 방식으로 필터링을 수행합니다.
   - **Kalman Filter**: 개별 측정값 스트림에 대해 예측 및 보정 단계를 거칩니다. `process_variance=1e-3`, `measurement_variance=1e-1` 파라미터를 사용하여 최적 추정치를 실시간 산출합니다.
@@ -22,6 +29,117 @@
 - **이상치 탐지 및 실시간 시각화 / 강제 중단 지원**: 산출된 상/하한선을 벗어나는 데이터를 이상치로 마킹하고, Lot별로 실시간 트렌드 차트를 그립니다. 중간에 `Ctrl+C`로 중단하더라도 현재까지의 차트(PDF) 및 통계치(Excel)를 `./output` 폴더에 안전하게 저장합니다.
 
 ---
+## 📶 주요 필터 (FFT vs. Kalman) 비교
+FFT와 Kalman Filter는 신호/시계열 데이터를 다루는 대표적인 알고리즘이지만, 목적과 동작 방식이 근본적으로 다릅니다. FFT는 **주파수 영역 분석**, Kalman Filter는 **시간 영역 상태 추정**에 특화되어 있습니다.
+
+### 핵심 개념 비교
+
+| 항목         | FFT (Fast Fourier Transform) | Kalman Filter                                                                                                                                                                                  |
+| ---------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **목적**     | 시간 도메인 → 주파수 도메인 변환          | 노이즈 포함 측정값으로 시스템 상태 추정                                                                                                                                                                         |
+| **처리 방식**  | 비재귀적, 배치(Batch) 처리           | 재귀적(Recursive) 처리                                                                                                                                                                              |
+| **입력**     | 등간격 샘플링된 시계열 신호              | 노이즈 포함 측정값 + 시스템 모델                                                                                                                                                                            |
+| **출력**     | 주파수별 진폭/위상 스펙트럼              | 현재 상태 추정값 + 오차 공분산                                                                                                                                                                             |
+| **시간 정보**  | 시간 정보 손실 (기본 DFT 기준)         | 시간 순서 유지, 이전 상태 활용                                                                                                                                                                             |
+| **확률 모델**  | 없음 (결정론적 변환)                 | 가우시안 분포 기반 확률적 추정 [[taeyoung96.github](https://taeyoung96.github.io/slam/SLAM_07/)]                                                                                                            |
+| **실시간 처리** | 어려움 (윈도우 필요)                 | 가능 (매 스텝 업데이트) [[developer-wh.tistory](https://developer-wh.tistory.com/entry/SORT-%EA%B5%AC%ED%98%84%EC%9D%84-%EC%9C%84%ED%95%9C-%EA%B8%B0%EC%B4%88-%EC%9D%B4%EB%A1%A0-3-feat-Kalman-filter)] |
+| **수학적 기반** | 이산 푸리에 변환(DFT)               | Bayes Filter의 선형 특수 케이스 [[taeyoung96.github](https://taeyoung96.github.io/slam/SLAM_07/)]                                                                                                      |
+| **가정 조건**  | 신호의 주기성 또는 유한 구간             | 선형 시스템 + 가우시안 노이즈 [[ko.wikipedia](https://ko.wikipedia.org/wiki/%EC%B9%BC%EB%A7%8C_%ED%95%84%ED%84%B0)]                                                                                        |
+| **계산 복잡도** | O(N log N)                   | O(n³) (상태 차원 n에 비례)                                                                                                                                                                            |
+
+### 공통점
+
+- 둘 다 **노이즈가 포함된 시계열 신호** 처리에 사용됨[[einfochips](https://www.einfochips.com/jp/blog/fault-detection-using-a-bank-of-kalman-filters-and-a-fast-fourier-transform/)]
+    
+- **신호 처리(Signal Processing)** 분야의 핵심 도구
+    
+- 제조, 진동 분석, 항공우주 등 **임베디드/에지 컴퓨팅** 환경에서 함께 사용되는 경우가 많음[[einfochips](https://www.einfochips.com/jp/blog/fault-detection-using-a-bank-of-kalman-filters-and-a-fast-fourier-transform/)]
+    
+- 실제로 **FFT로 주파수 분석 후, Kalman Filter로 상태 추정**하는 하이브리드 파이프라인이 고장 진단(FDI)에 활용됨[[einfochips](https://www.einfochips.com/jp/blog/fault-detection-using-a-bank-of-kalman-filters-and-a-fast-fourier-transform/)]
+    
+
+### 주요 적용 분야
+
+| 분야         | FFT                   | Kalman Filter                                                                                  |
+| ---------- | --------------------- | ---------------------------------------------------------------------------------------------- |
+| **제조/진동**  | 기계 이상 진단, FFT 스펙트럼 분석 | 센서 퓨전, 진동 상태 추정                                                                                |
+| **자율주행**   | 레이다 신호 분석             | GPS + IMU 융합, 위치 추적 [[velog](https://velog.io/@hzzz15/Kalman-Filter)]                          |
+| **음향/오디오** | 음성 인식, 노이즈 제거 필터 설계   | 음성 신호 추적                                                                                       |
+| **금융**     | 주기성 분석, 사이클 검출        | 주가 필터링, 시계열 스무딩 [[velog](https://velog.io/@hzzz15/Kalman-Filter)]                              |
+| **로봇공학**   | 조인트 진동 주파수 분석         | 위치/속도 추정 [[ko.wikipedia](https://ko.wikipedia.org/wiki/%EC%B9%BC%EB%A7%8C_%ED%95%84%ED%84%B0)] |
+| **항공우주**   | 레이다 신호 처리             | 고도/속도/위치 추적 [[velog](https://velog.io/@hzzz15/Kalman-Filter)]                                  |
+| **의료/바이오** | ECG/EEG 주파수 분석        | 생체신호 노이즈 제거                                                                                    |
+
+### Python 함수 및 주요 파라미터
+
+#### FFT — `numpy.fft` / `scipy.fft`
+
+| 함수                     | 파라미터                               | 설명                 |
+| ---------------------- | ---------------------------------- | ------------------ |
+| `np.fft.fft(x)`        | `x`: 입력 배열, `n`: FFT 길이, `axis`: 축 | 1D 복소 FFT          |
+| `np.fft.rfft(x)`       | 위와 동일                              | 실수 입력 전용 (절반 스펙트럼) |
+| `np.fft.fftfreq(n, d)` | `n`: 샘플 수, `d`: 샘플 간격(1/샘플링 주파수)   | 주파수 축 생성           |
+| **`scipy.fft.fft(x)`** | `workers=-1`로 병렬 처리 가능             | scipy 버전 (속도 우수)   |
+| `np.fft.ifft(X)`       | `X`: 주파수 도메인 배열                    | 역변환 (복원)           |
+
+```python
+from scipy.fft import rfft, irfft, rfftfreq
+
+signal = history[:, col_idx]  # 최대 10,000개 히스토리 데이터
+W = rfft(signal)
+freqs = rfftfreq(len(signal))
+cutoff_freq = freqs.max() * cutoff_ratio  # 예: 0.5
+W[freqs > cutoff_freq] = 0  # 고주파 차단
+filtered = irfft(W, n=len(signal))
+fft_result = filtered[-chunk_len:]
+```
+
+#### Kalman Filter — `filterpy` / `pykalman`
+
+|파라미터|의미|비고|
+|---|---|---|
+|`F` (또는 `A`)|상태 전이 행렬|시스템 동적 모델 [[geeksforgeeks](https://www.geeksforgeeks.org/python/kalman-filter-in-python/)]|
+|`H`|관측 행렬|상태 → 측정값 매핑 [[geeksforgeeks](https://www.geeksforgeeks.org/python/kalman-filter-in-python/)]|
+|`Q`|프로세스 노이즈 공분산|모델 불확실성 [[wikidocs](https://wikidocs.net/336316)]|
+|`R`|측정 노이즈 공분산|센서 오차 크기 [[wikidocs](https://wikidocs.net/336316)]|
+|`P` (또는 `P0`)|초기 오차 공분산|초기 불확실성 [[geeksforgeeks](https://www.geeksforgeeks.org/python/kalman-filter-in-python/)]|
+|`x0`|초기 상태 벡터|초기 추정값 [[geeksforgeeks](https://www.geeksforgeeks.org/python/kalman-filter-in-python/)]|
+|`B`|제어 입력 행렬|외부 제어가 없으면 생략 [[geeksforgeeks](https://www.geeksforgeeks.org/python/kalman-filter-in-python/)]|
+
+
+```python
+# algorithm.py 내 자체 구현 1D Kalman Filter
+process_variance, measurement_variance = 1e-3, 1e-1
+
+# 이전 추정 상태 (est: 추정값, err: 추정 오차)
+est, err = self.kf_state.get(col_idx, (val, 1.0))
+
+# 1. 예측 (Predict)
+priori_est = est
+priori_err = err + process_variance
+
+# 2. 교정 (Update)
+K = priori_err / (priori_err + measurement_variance)  # 칼만 이득
+est = priori_est + K * (val - priori_est)
+err = (1 - K) * priori_err
+
+self.kf_state[col_idx] = (est, err)
+```
+
+
+### 변형(Variants) 분류
+
+|구분|FFT 계열|Kalman Filter 계열|
+|---|---|---|
+|**기본형**|DFT → FFT (Cooley-Tukey 알고리즘)|Linear Kalman Filter|
+|**비선형 확장**|STFT (Short-Time FT, 시간-주파수 동시 분석)|Extended KF (EKF), Unscented KF (UKF)|
+|**고급형**|Wavelet Transform (다해상도)|Particle Filter (비가우시안)|
+|**실시간 최적화**|Sliding Window FFT|Fast Kalman Filter (FKF) [[ko.wikipedia](https://ko.wikipedia.org/wiki/%EA%B3%A0%EC%86%8D_%EC%B9%BC%EB%A7%8C_%ED%95%84%ED%84%B0)]|
+
+**제조 진동 분석**이나 **센서 데이터 퓨전** 연구에서는 FFT로 지배 주파수를 찾고, 그 주파수 성분을 Kalman Filter의 상태 공간 모델에 반영하는 방식이 가장 강력한 접근법입니다.[[einfochips](https://www.einfochips.com/jp/blog/fault-detection-using-a-bank-of-kalman-filters-and-a-fast-fourier-transform/)]
+
+---
+
 
 ## 🛠️ 함수 단위 수행 절차 (Execution Flow)
 
@@ -112,9 +230,9 @@ RT_Detect/
 ├── algorithm.py          # FFT/Kalman 필터 및 Recursive 3-Sigma 이상 탐지 모듈
 ├── main.py               # 파이프라인 메인 실행 컨트롤러 (Interactive 환경 지원)
 ├── run_pipeline.sh       # 파이프라인 구동용 쉘 스크립트
-├── rt_detect_plan(Gemini).md # 프로젝트 기획서 원본
 └── README.md             # 프로젝트 설명서 (현재 파일)
 ```
+
 
 ---
 
@@ -126,6 +244,7 @@ RT_Detect/
 
 ### 1. 필수 패키지 설치
 Python 3.x 환경에서 다음 패키지가 설치되어 있어야 합니다.
+
 ```bash
 pip install pandas scipy numpy matplotlib openpyxl
 ```
@@ -146,7 +265,52 @@ pip install pandas scipy numpy matplotlib openpyxl
 
 실행 후 터미널 창에 나타나는 안내에 따라 **분석할 파일 선택, Grouping(Lot) 기준 칼럼, 분석 대상 데이터 칼럼, EWMA 업데이트용 $\alpha$ 값, 초기 무시할 청크 개수(최소 2), 이상치 판정 기준(Raw/FFT/Kalman)**을 대화형으로 입력하시면 실시간 차트가 구동됩니다. (중간에 강제 종료를 원할 경우 `Ctrl+C`를 누르면 중단된 지점까지의 결과가 자동 저장됩니다.)
 
+- 사용 변수명과 설정값 예시:
+  t=0.1s, n=10, ignore_init=2, display_limit=300, basis=FFT, alpha=0.15, baseline_size=30)
+
+```bash
+./run_pipeline.sh -t 0.1 -n 10
+==================================================
+ 실시간 설비 데이터 수집 및 이상 탐지 파이프라인 시작
+ 수집 주기(t) = 0.1 초, 표본 수(n) = 10 개
+==================================================
+
+[ 분석 대상 파일 선택 ]
+  1. (확인)210906_검증내용.xlsx
+  2. 1024_final (1).csv
+  3. 1024_sensor7_3sigma (3).csv
+  4. Result.xlsx
+  5. YCCMonitoring.xlsx
+  6. preprocessed_data0912(symbolic).csv
+  7. sample_data.csv
+파일 번호를 선택하세요 (1~7): 7
+
+[ 칼럼 목록 ]
+  1. sensor_id
+  2. time
+  3. value
+  4. upper_limit
+  5. lower_limit
+  6. outlier_status
+
+Grouping 기준이 되는 칼럼 번호를 선택하세요 (복수일 경우 쉼표로 구분, 없으면 0 입력): 1
+
+분석 대상이 되는 데이터 칼럼 번호를 선택하세요 (복수일 경우 쉼표로 구분): 3
+
+EWMA 평균/분산 업데이트에 사용할 alpha 값을 입력하세요 (기본 0.15): 
+
+각 그룹별 초기 무시할 부분군(Chunk) 수를 입력하세요 (최소 2, 기본 2): 
+
+한 화면에 표시할 최대 점(부분군 평균) 개수를 입력하세요 (기본 300): 
+
+이상치 판정 기준을 선택하세요 (1: Raw, 2: FFT, 3: Kalman) [기본 2]: 2
+
+기저선(Baseline) 산정에 필요한 데이터 숫자를 입력하세요 (기본 30): 
+
+```
 ### 4. 결과 확인
 파이프라인 실행이 완료된 후 창을 닫으면, `./output` 폴더에 분석 결과 파일이 생성됩니다.
 - **PDF 파일 (`.pdf`)**: 원본 데이터, FFT/Kalman 필터링된 데이터, 상하한선(UCL/LCL) 밴드, 이상치 탐지 지점이 표시된 그룹/타겟별 시계열 차트가 포함되어 있습니다.
+  붉은색 세로선은 평균 이동(Mean Shift), 푸른색 세로선은 분산 증가(Variance Spike)을 의미함.
 - **Excel 파일 (`.xlsx`)**: 각 청크 단위로 기록된 원본 값, 필터링 평균값, 계산된 상/하한 수치 및 이상치 판정 여부 상세 데이터가 저장됩니다.
+![[Img/SampleChart.png]]

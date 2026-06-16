@@ -2,7 +2,7 @@
 
 # 기본값 설정
 T_VAL=0.1
-N_VAL=4
+N_VAL=10
 
 # 인자 파싱 (예: ./run_pipeline.sh -t 1.0 -n 10)
 while getopts "t:n:" opt; do

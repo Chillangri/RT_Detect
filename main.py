@@ -661,6 +661,8 @@ def main():
                     continue
 
                 chunk_len = len(sub_chunk)
+                if chunk_len < args.n:
+                    continue
 
                 # ── 필터 적용 (개별 데이터 스트림 기준) ──
                 fft_chunk, kf_chunk = algo.apply_filters(target_data.values, cutoff_ratio=0.5)
